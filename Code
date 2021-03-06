@@ -1,0 +1,366 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <DHT.h>
+#include <Adafruit_Sensor.h>
+#include <PubSubClient.h>
+#include <NTPClient.h>
+#include <OLED_I2C.h>
+
+
+
+//**************************************
+//*********** MQTT CONFIG **************
+//**************************************
+const char *mqtt_server = "34.121.87.245";
+const int mqtt_port = 1883;
+const char *mqtt_user = "admin";
+const char *mqtt_pass = "public";
+const char *root_topic_subscribe = "topic/input";
+const char *move_topic_subscribe = "topic/movement";
+const char *sleep_topic_subscribe = "topic/sleep";
+const char *root_topic_publish = "topic/output";
+const char *temp_topic_publish = "topic/temperature";
+const char *humd_topic_publish = "topic/humidity";
+
+
+//**************************************
+//*********** TIME ZONE ****************
+//**************************************
+#define NTP_OFFSET  -21600 // In seconds 
+#define NTP_INTERVAL 60 * 1000    // In miliseconds
+#define NTP_ADDRESS  "1.mx.pool.ntp.org"
+
+
+//**************************************
+//*********** SLEEP CONF ***************
+//**************************************
+#define DEEP_SLEEP_TIME 10
+
+WiFiUDP ntpUDP;
+
+NTPClient timeClient(ntpUDP, NTP_ADDRESS, NTP_OFFSET, NTP_INTERVAL);
+//**************************************
+//*********** WIFICONFIG ***************
+//**************************************
+const char* ssid = "ARRIS-B8C2";
+const char* password =  "AB537588D46344A4";
+
+
+
+//**************************************
+//*********** GLOBALES   ***************
+//**************************************
+WiFiClient espClient;
+PubSubClient client(espClient);
+char msg[25];
+//DHT11 messages
+char msg_humd[5];
+char msg_temp[5];
+char msg_rel1[2];
+char msg_rel2[2];
+
+long count=0;
+long lastMsg = 0;
+
+//Pulse rate 
+const int PulsePin = 15;
+
+//***********  RELAYS ******************
+//*************PINES********************
+const int RELAY1 = 27;
+const int RELAY2 = 26;
+
+//*********** SENSORS ******************
+//*************PINES********************
+
+const int PIR = 18;
+const int DHTPin = 4;
+
+#define DHTTYPE DHT11
+
+//************** OLED ******************
+//************* SCREEN******************
+OLED myOLED(21,22,-1);
+extern uint8_t SmallFont[]; 
+extern uint8_t MediumNumbers[];
+
+
+//************************
+//** F U N C I O N E S ***
+//************************
+void callback(char* topic, byte* payload, unsigned int length);
+void reconnect();
+void setup_wifi();
+void printLocalTime();
+void goToDeepSleep();
+
+//************************
+//** P U L S E R A T E ***
+//******INTERRUPT*********
+/*
+volatile int BPM;
+volatile int Signal;
+volatile int IBI = 600;
+volatile boolean Pulse = false;
+volatile boolean QS = false;*/
+
+//*************DHT11***********
+DHT dht(DHTPin, DHTTYPE);
+
+void setup() {
+
+  Serial.begin(9600);
+  setup_wifi();
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+  
+
+  pinMode(PulsePin, INPUT);
+  pinMode(RELAY1, OUTPUT);
+  pinMode(RELAY2, OUTPUT);
+  pinMode(DHTPin,INPUT);
+  pinMode(PIR,INPUT_PULLUP);
+
+  myOLED.begin();
+  myOLED.setFont(SmallFont);
+  myOLED.print("Smart Office", CENTER, 20);
+  myOLED.update();
+  delay(1000);
+  myOLED.clrScr();
+
+ timeClient.begin();
+ dht.begin();
+ //interruptSetup();
+}
+
+void loop() {
+	
+	if (!client.connected()) {
+	  	client.subscribe(root_topic_subscribe);
+		reconnect();
+	}
+
+    else  {
+    String str = "La cuenta es -> " + String(count);
+    str.toCharArray(msg,25);
+    client.publish(root_topic_publish,msg);
+    count++;
+    delay(300);
+  }
+  client.loop();
+
+
+	//Time zone
+	myOLED.clrScr();
+	timeClient.update();
+	String formattedTime = timeClient.getFormattedTime();
+	myOLED.begin();
+    myOLED.setFont(SmallFont);
+    myOLED.print(formattedTime, CENTER, 0);
+    myOLED.update();
+
+	//PIR SENSOR
+
+    bool interPir = digitalRead(PIR);
+	if(interPir){
+    Serial.println("Presence detected");
+	client.publish(move_topic_subscribe,"1");
+	delay(200);
+  }
+  else {
+	  client.publish(move_topic_subscribe,"0");
+  }
+
+	
+	//read humidity
+	float h = dht.readHumidity();
+ 	// Read temperature as Celsius (the default)
+ 	float t = dht.readTemperature();
+	String str_h= String(h);
+	String str_tem = String(t);
+
+	
+
+	Serial.print(h);
+	Serial.print(t);
+
+	str_h.toCharArray(msg_humd,5);
+	str_tem.toCharArray(msg_temp,5);
+
+	client.publish(temp_topic_publish,msg_temp);
+	client.publish(humd_topic_publish,msg_humd);
+
+	
+   
+
+
+	
+	//sleep mode after 5 min
+
+	
+	
+	
+	
+
+  
+}
+
+
+
+
+//*****************************
+//***    CONEXION WIFI      ***
+//*****************************
+void setup_wifi(){
+	delay(10);
+	// Nos conectamos a nuestra red Wifi
+	Serial.println();
+	Serial.print("Conectando a ssid: ");
+	Serial.println(ssid);
+
+	WiFi.begin(ssid, password);
+
+	while (WiFi.status() != WL_CONNECTED) {
+		delay(500);
+		Serial.print(".");
+	}
+
+	Serial.println("");
+	Serial.println("Conectado a red WiFi!");
+	Serial.println("Dirección IP: ");
+	Serial.println(WiFi.localIP());
+}
+
+
+
+//*****************************
+//***    CONEXION MQTT      ***
+//*****************************
+
+void reconnect() {
+
+	while (!client.connected()) {
+		Serial.print("Intentando conexión Mqtt...");
+		// Creamos un cliente ID
+		String clientId = "ESP32_GIL";
+		clientId += String(random(0xffff), HEX);
+		// Intentamos conectar
+		if (client.connect(clientId.c_str(),mqtt_user,mqtt_pass)) {
+			Serial.println("Conectado!");
+			 myOLED.begin();
+ 			 myOLED.setFont(SmallFont);
+  			 myOLED.print("mqtt broker ", CENTER, 20);
+			 myOLED.print("conexion sucess", CENTER, 30);
+  			 myOLED.update();
+			client.subscribe(root_topic_subscribe);
+  			 
+			// Nos suscribimos
+			if(client.subscribe(root_topic_subscribe)){
+		
+        Serial.println("Suscripcion ok");
+		
+      }else{
+        Serial.println("fallo Suscripciión");
+      }
+		} else {
+			Serial.print("falló :( con error -> ");
+			Serial.print(client.state());
+			Serial.println(" Intentamos de nuevo en 5 segundos");
+			delay(5000);
+		}
+	}
+}
+
+
+//*****************************
+//***       CALLBACK        ***
+//*****************************
+
+void callback(char* topic, byte* payload, unsigned int length){
+	
+char p[length + 1];
+memcpy(p, payload, length);
+p[length] = NULL;
+
+String msg(p);
+
+    Serial.print("Changing output to ");
+    if(msg == "1"){
+      Serial.println("on");
+	  myOLED.clrScr();
+	  myOLED.begin();
+      myOLED.setFont(SmallFont);
+      myOLED.print("Light 1 ON", CENTER, 20);
+      myOLED.update();
+        delay(500);
+	  myOLED.clrScr();
+      digitalWrite(RELAY1, HIGH);
+    }
+    else if(msg == "0"){
+      Serial.println("off");
+      digitalWrite(RELAY1, LOW);
+	  myOLED.clrScr();
+	  myOLED.begin();
+      myOLED.setFont(SmallFont);
+      myOLED.print("Light 1 OFF", CENTER, 20);
+      myOLED.update();
+	    delay(500);
+	  myOLED.clrScr();
+    }
+	else if(msg == "2"){
+      Serial.println("on");
+      digitalWrite(RELAY2, HIGH);
+
+	  myOLED.clrScr();
+	  myOLED.begin();
+      myOLED.setFont(SmallFont);
+      myOLED.print("Light 2 ON", CENTER, 20);
+      myOLED.update();
+	    delay(500);
+	  myOLED.clrScr();
+    }
+
+	else if(msg == "3"){
+      Serial.println("off");
+      digitalWrite(RELAY2, LOW);
+
+	 
+	  myOLED.begin();
+      myOLED.setFont(SmallFont);
+      myOLED.print("Light 2 OFF", CENTER, 20);
+      myOLED.update();
+	  delay(500);
+	  myOLED.clrScr();
+    }
+
+	else if(msg == "4"){
+      Serial.println("Sleeping. . .");
+      digitalWrite(RELAY2, LOW);
+
+	 
+	  myOLED.begin();
+      myOLED.setFont(SmallFont);
+      myOLED.print("Sleeping", CENTER, 20);
+      myOLED.update();
+	  delay(1500);
+	  myOLED.clrScr();
+
+		goToDeepSleep();
+    }
+
+  Serial.write(payload,length);
+  Serial.println();
+
+	
+
+}
+
+//*****************************
+//***       SLEEP FUN       ***
+//*****************************
+void goToDeepSleep()
+{
+	esp_sleep_enable_timer_wakeup(15*60*1000000);
+	esp_deep_sleep_start();
+}
+
